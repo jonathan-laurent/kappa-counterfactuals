@@ -34,7 +34,7 @@ type blocking_predicate =
 
 val set_events_to_block : blocking_predicate option -> state -> state
 (** Registers a predicate that is used to specify events
-    that will be blocked both in the factual and counterfactual world.
+    that will be blocked in the counterfactual world.
     If [None] is given, nothing will be blocked. *)
 
 

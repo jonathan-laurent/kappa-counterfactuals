@@ -623,7 +623,7 @@ let do_factual_step blocked step st =
     (New_reference_state (ref_state.Replay.graph, obs)) graph in
   let st = { st with graph ; ref_state } in
 
-  if not (blocked || step_is_blocked st.events_to_block st.model step) &&
+  if not (blocked (* || step_is_blocked st.events_to_block st.model step *)) &&
      Replay.is_step_triggerable_on_edges (Mri.get_edges st.graph) step
      
   then begin
@@ -716,7 +716,8 @@ let resimulate ?stop_after:(stop=fun _ -> false) ~blocked ~rcv_step trace_file =
   let emit model rs = rcv_step model rs in
   try
     trace_file |> Trace.fold_trace_file (fun model st step ->
-      let next = (step, false) in
+      let blocked = step_is_blocked st.events_to_block st.model step in
+      let next = (step, blocked) in
       loop_until_consummed ~stop (emit model) (Some next) st
     ) state
     |> ignore
