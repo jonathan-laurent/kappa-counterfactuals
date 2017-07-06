@@ -14,15 +14,14 @@ let options = [
 
 let anon_arg f = trace_file := f
 
-let step_ast_rule_name model = function
-  | Trace.Rule (r, _, _) -> 
-    Some (Format.asprintf "%a" (Model.print_rule ~env:model) r)
-  | _ -> None
+let blocked model r _ = 
+  match r with
+  | None -> false
+  | Some r -> Format.asprintf "%a" (Model.print_rule ~env:model) r = !blocked
 
 let () = 
     Printexc.record_backtrace true ;
     Arg.parse options anon_arg usage ;
-    let blocked model step = step_ast_rule_name model step = Some !blocked in
     let rcv_step model step = 
       Format.printf "%a@;" (Resimulation.debug_print_resimulation_step model) step in
 

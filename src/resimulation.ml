@@ -238,7 +238,7 @@ struct
 
   type message = div_instances_message
 
-  let send_message msg st =
+  let receive_message msg st =
       match msg with
       | New_cur_mixture edges -> { st with current_mixture = edges }
       | New_reference_state (edges, obs) ->
@@ -475,11 +475,16 @@ module Modified_rule_interpreter =
 
 module Mri = Modified_rule_interpreter
 
+type blocking_predicate = 
+  Model.t -> int option ->
+  (Instantiation.concrete Instantiation.action) list -> bool
+
 type state = {
   graph : Modified_rule_interpreter.t ;
   ref_state : Replay.state ;
   counter : Counter.t ;
   model : Model.t ;
+  events_to_block : blocking_predicate option ;
 }
 
 type step =
@@ -497,6 +502,42 @@ let debug_print_resimulation_step env f =
       fprintf f "[X] %a" pp_step step
     | Counterfactual_happened step -> fprintf f "[C] %a" pp_step step
 
+
+let actions_of_step = function
+  | Trace.Subs _ -> ([],[])
+  | Trace.Rule (_,e,_) | Trace.Pert (_,e,_) ->
+    (e.Instantiation.actions,e.Instantiation.side_effects_dst)
+  | Trace.Init y -> (y,[])
+  | Trace.Obs (_,_,_) -> ([],[])
+  | Trace.Dummy _ -> ([],[])
+
+let time_of_step ~def step = 
+  match Trace.simulation_info_of_step step with
+  | None -> def
+  | Some infos -> infos.Trace.Simulation_info.story_time
+
+let step_is_blocked (pred : blocking_predicate option) model step =
+  match pred with
+  | None -> false
+  | Some pred ->
+    let rule_id = 
+      match step with
+      | Trace.Rule (rid, _, _) -> Some rid
+      | _ -> None in
+    let actions = fst (actions_of_step step) in
+    pred model rule_id actions
+
+let simulation_event_is_blocked model = function
+  | None -> None
+  | Some pred -> 
+    Some (fun rule_id _matching actions -> pred model rule_id actions)
+
+let set_events_to_block pred state =
+  let pred' = simulation_event_is_blocked state.model pred in
+  { state with
+    events_to_block = pred ;
+    graph = Mri.set_events_to_block pred' state.graph
+  }
 
 (** {6 Compute observables to update after a factual step } *)
 
@@ -521,14 +562,6 @@ let valid_positive_transformation_on_same_sites edges =
 
 let valid_positive_transformations_on_same_sites edges trans =
   List.concat (List.map (valid_positive_transformation_on_same_sites edges) trans)
-
-let actions_of_step = function
-  | Trace.Subs _ -> ([],[])
-  | Trace.Rule (_,e,_) | Trace.Pert (_,e,_) ->
-    (e.Instantiation.actions,e.Instantiation.side_effects_dst)
-  | Trace.Init y -> (y,[])
-  | Trace.Obs (_,_,_) -> ([],[])
-  | Trace.Dummy _ -> ([],[])
 
 let observables_to_update state step =
   let actions, side_effects_dst = actions_of_step step in
@@ -558,10 +591,6 @@ let debug_print_obs_updates model (obs, deps) =
   in
   Format.printf "@.%a@.@.%d@." pp_obs_list obs (Operator.DepSet.size deps)
 
-let step_time step = 
-  match Trace.simulation_info_of_step step with
-  | None -> assert false
-  | Some info -> info.Trace.Simulation_info.story_time
 
 
 
@@ -575,7 +604,9 @@ let init model random_state =
   { counter ;
     graph = Mri.empty ~with_trace:true random_state model counter ;
     ref_state = Replay.init_state ~with_connected_components:true ;
-    model }
+    model ;
+    events_to_block = None ;
+  }
 
 
 
@@ -592,8 +623,9 @@ let do_factual_step blocked step st =
     (New_reference_state (ref_state.Replay.graph, obs)) graph in
   let st = { st with graph ; ref_state } in
 
-  if Replay.is_step_triggerable_on_edges (Mri.get_edges st.graph) step
-     && not blocked
+  if not (blocked || step_is_blocked st.events_to_block st.model step) &&
+     Replay.is_step_triggerable_on_edges (Mri.get_edges st.graph) step
+     
   then begin
     let graph = Mri.update_edges_from_actions ~outputs:(fun _ -> ())
       (Model.signatures st.model) st.counter (Model.domain st.model)
@@ -641,7 +673,9 @@ let do_step next_ref_step_opt st =
   let get_next_ref_step, next_ref_step_time, block_next_ref_step =
     match next_ref_step_opt with
     | None -> (fun () -> assert false), infinity, false
-    | Some (s, t, b) -> (fun () -> s), t, b in
+    | Some (s, b) -> 
+      let t = time_of_step ~def:(st.ref_state.Replay.time) s in
+      (fun () -> s), t, b in
 
   let div_activity = Mri.activity st.graph in
   let rd = Random.State.float (Mri.get_random_state st.graph) 1.0 in
@@ -676,11 +710,13 @@ let rec loop_until_consummed ~stop emit next_ref_step_opt st =
 
 
 let resimulate ?stop_after:(stop=fun _ -> false) ~blocked ~rcv_step trace_file =
-  let state model = init model (Random.get_state ()) in
+  let state model = 
+    init model (Random.get_state ())
+    |> set_events_to_block (Some blocked) in
   let emit model rs = rcv_step model rs in
   try
     trace_file |> Trace.fold_trace_file (fun model st step ->
-      let next = (step, step_time step, blocked model step) in
+      let next = (step, false) in
       loop_until_consummed ~stop (emit model) (Some next) st
     ) state
     |> ignore
