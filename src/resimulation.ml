@@ -30,8 +30,11 @@ module Algos = struct
   let draw_at_least_one random_state probs = 
 
       let draw_exp p =
-          let x = Random.State.float random_state 1.0 in
-          int_of_float (ceil (log1p (-. x) /. log1p (-. p))) in
+          if p = 0. then max_int
+          else if p = 1. then 1
+          else
+            let x = Random.State.float random_state 1.0 in
+            int_of_float (ceil (log1p (-. x) /. log1p (-. p))) in
 
       let array_min t = 
           Array.fold_left min t.(0) t in
@@ -41,8 +44,8 @@ module Algos = struct
       Array.map (fun e -> e = m) r
 
   (* Alternate implementation *)
-  let draw_at_least_one' probs =
-      let draw p = (Random.float 1.0) <= p in
+  let draw_at_least_one' random_state probs =
+      let draw p = (Random.State.float random_state 1.0) <= p in
       let f p1 lst = p1 /. (1. -. (List.fold_left (fun acc e -> acc*.(1. -. e)) 1. (p1::lst))) in
       let rec _draw_at_least_one probs = 
       match probs with
