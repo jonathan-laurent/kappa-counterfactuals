@@ -30,9 +30,11 @@ module Algos = struct
   let draw_at_least_one random_state probs = 
 
       let draw_exp p =
-          let x = Random.State.float random_state 1.0 in
-          max(1, int_of_float (ceil (log1p (-. x) /. log1p (-. p)))) in
-          (* The [max] operation is here for the case p=1.0 *)
+          if p = 0. then max_int
+          else if p = 1. then 1
+          else
+            let x = Random.State.float random_state 1.0 in
+            int_of_float (ceil (log1p (-. x) /. log1p (-. p))) in
 
       let array_min t = 
           Array.fold_left min t.(0) t in
