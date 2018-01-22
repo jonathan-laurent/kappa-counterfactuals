@@ -24,7 +24,7 @@ val debug_print_resimulation_step : Model.t -> Format.formatter -> step -> unit
 
 exception End_of_resimulation
 
-type blocking_predicate = 
+type blocking_predicate =
   Model.t -> 
   int option -> 
   (* Matching.t -> *) (* TODO *)
@@ -40,7 +40,7 @@ val set_events_to_block : blocking_predicate option -> state -> state
 
 val init : Model.t -> Random.State.t -> state
 
-val do_step : 
+val do_step :
   (Trace.step * bool) option -> state -> 
   bool * step option * state
 (** [do_step next_reference_step state]

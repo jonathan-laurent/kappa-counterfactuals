@@ -336,7 +336,7 @@ struct
 
   
   let fold_picked_instance st random_state pats ~init f =
-    let conv_sets = 
+    let conv_sets =
       Array.map (fun pat_id -> Roots.of_pattern pat_id st.conv_roots) pats in
     let div_sets = 
       Array.map (fun pat_id -> Roots.of_pattern pat_id st.div_roots) pats in
@@ -384,7 +384,7 @@ struct
       let tab = Array.make n (-1) in
       let rec aux j acc = 
         let take_root r acc = begin tab.(j) <- r  ; aux (j+1) acc end in
-        if j >= n then call (Array.to_list tab) acc
+        if j >= n then call tab acc
         else
           let acc = S.fold take_root div_sets.(j) acc in
           if (j = i) then acc
@@ -408,7 +408,7 @@ struct
     let div_sets = [| [21]; [21]; [21; 22] |] in
     fold_combinations (module List_as_set) conv_sets div_sets ~init:()
       (fun l () ->
-        l |> List.iter (fun i ->
+        l |> Array.iter (fun i ->
           Printf.printf "%d " i
         ) ;
         print_newline ()
@@ -459,10 +459,9 @@ struct
      map_fold4 ~def:Mods.IntSet.empty map1_conv map2_conv map1_div map2_div ~init 
       (fun _ rts1_conv rts2_conv rts1_div rts2_div acc ->
         fold_combinations (module Mods.IntSet) 
-          [| rts1_conv ; rts2_conv |] [| rts1_div ; rts2_div |] ~init:acc (fun l acc ->
-          match l with
-          | [r1; r2] -> f (r1, r2) acc
-          | _ -> assert false
+          [| rts1_conv ; rts2_conv |] [| rts1_div ; rts2_div |] ~init:acc (fun c acc ->
+          assert (Array.length c = 2) ;
+          f (c.(0), c.(1)) acc
         )
       )
 
@@ -590,7 +589,7 @@ let debug_print_obs_updates model (obs, deps) =
     l |> List.iter (fun (pat, (root, _)) ->
       let domain = Model.domain model in
       Format.fprintf fmt "({@[<h>%a@]}, %d)@." 
-        (Pattern.print ~new_syntax:false ~domain ~with_id:true) pat root)
+        (Pattern.print ~domain ~with_id:true) pat root)
   in
   Format.printf "@.%a@.@.%d@." pp_obs_list obs (Operator.DepSet.size deps)
 
