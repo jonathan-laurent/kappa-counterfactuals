@@ -44,7 +44,7 @@ let with_file filename f =
     close_out oc ;
     v
 
-let () = 
+let () =
     Printexc.record_backtrace true ;
     Arg.parse options anon_arg usage ;
 
@@ -55,10 +55,7 @@ let () =
 
     let do_init state =
       snd (add_intervention blocked state)
-      |> set_max_consecutive_null !max_consecutive_null
-      in
-
-    let handle_null_event () = incr n_null in
+      |> set_max_consecutive_null !max_consecutive_null in
 
     with_file !output (fun f ->
       let handle_step model step =
@@ -69,6 +66,9 @@ let () =
         end ;
         Format.fprintf f "%a@;" 
           (Resimulation.debug_print_resimulation_step model) step in
+      let handle_null_event () = 
+        incr n_null ;
+        Format.fprintf f "[N] {%d}@;" !n_null in
       Format.fprintf f "@[<v>" ;
       resimulate ~do_init ~handle_step ~handle_null_event !trace_file ;
       Format.fprintf f "@]@." 

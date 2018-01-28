@@ -16,4 +16,6 @@
 
 %init: 'VA' K(x{u}), S(x{u})
 
-%mod: |S(x{p})| > 0 do $STOP ;
+// Stop the simulation when a 
+// majority of substrates are phosphorylated:
+%mod: |S(x{p})| > |S(x{u})| do $STOP ;

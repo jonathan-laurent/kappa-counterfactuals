@@ -64,6 +64,18 @@ module Util = struct
 
   let array_product = Array.fold_left ( * ) 1
 
+  let array_eq p p' =
+    let exception Different_arrays in
+    let n = Array.length p in
+      Array.length p' = n &&
+      begin
+        try
+          p |> Array.iteri (fun i v ->
+            if p'.(i) <> v then raise Different_arrays) ;
+          true
+        with Different_arrays -> false
+      end
+
   let partition_int_collection f col = 
     let n = IntCollection.size col in
     let true_c = IntCollection.create n in
@@ -367,6 +379,14 @@ struct
 
   (** {6 Enumerating instances } *)
 
+
+  module Pat = struct
+    type t = int array
+    let equal = array_eq
+    let hash p = Hashtbl.hash (Array.to_list p)
+  end
+  module PatHashtbl = Hashtbl.Make(Pat)
+
   let fold_combinations (type set) (module S : INT_SET with type t = set)
     conv_sets div_sets ~init f =
 
@@ -374,25 +394,25 @@ struct
     let n' = Array.length div_sets  in
     assert (n = n') ;
 
-    let size = 
+    let size =
         array_product (array_zip_with (+) 
           (Array.map S.size conv_sets) (Array.map S.size div_sets))
         - array_product (Array.map S.size conv_sets) in
 
-    let closed_list = Hashtbl.create size in
+    let closed_list = PatHashtbl.create size in
 
     let call l acc = 
-      if Hashtbl.mem closed_list l then acc
+      if PatHashtbl.mem closed_list l then acc
       else begin
         let acc = f l acc in
-        Hashtbl.add closed_list l () ;
+        PatHashtbl.add closed_list (Array.copy l) () ;
         acc
       end in
 
     let take_div_at_i i acc =
       let tab = Array.make n (-1) in
       let rec aux j acc = 
-        let take_root r acc = begin tab.(j) <- r  ; aux (j+1) acc end in
+        let take_root r acc = begin tab.(j) <- r ; aux (j+1) acc end in
         if j >= n then call tab acc
         else
           let acc = S.fold take_root div_sets.(j) acc in
@@ -401,7 +421,7 @@ struct
       in aux 0 acc in
 
     let acc = List.fold_right take_div_at_i (Util.range 0 (n-1)) init in
-    assert (Hashtbl.length closed_list = size) ;
+    assert (PatHashtbl.length closed_list = size) ;
     acc
 
 
@@ -422,7 +442,6 @@ struct
         ) ;
         print_newline ()
       )
-
 
   let process_excp pats set = function
   | None -> ()
@@ -820,3 +839,4 @@ let resimulate
     ) state
     |> ignore
   with End_of_resimulation -> ()
+
