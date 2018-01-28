@@ -97,6 +97,15 @@ module Util = struct
       | Some y -> y :: map_filter f xs
       | None -> map_filter f xs
 
+  module Int = struct type t = int let compare = compare end
+  module IntMap = Map.Make(Int)
+
+  let identity x = x
+
+  let const x _ = x
+
+  let const2 x _ _ = x
+
 end
 
 open Util
@@ -106,7 +115,7 @@ open Util
 (* DIVERGENT INSTANCES                                                        *)
 (******************************************************************************)
 
-type div_instances_message = 
+type div_instances_message =
     | New_cur_mixture of Edges.t
     (** This message is sent when the current mixture is updated.
         A reference to the current mixture is needed by `is_divergent` *)
@@ -477,22 +486,33 @@ module Modified_rule_interpreter =
 
 module Mri = Modified_rule_interpreter
 
-type blocking_predicate = 
-  Model.t -> int option ->
-  (Instantiation.concrete Instantiation.action) list -> bool
+type event_properties = {
+  rule_instance: int option ;
+  actions: (Instantiation.concrete Instantiation.action) list ;
+  factual_event_id: int option ;
+}
+
+type event_predicate = Model.t -> event_properties -> bool
+
+type intervention_id = int
 
 type state = {
   graph : Modified_rule_interpreter.t ;
   ref_state : Replay.state ;
   counter : Counter.t ;
   model : Model.t ;
-  events_to_block : blocking_predicate option ;
+  max_consecutive_null : int ;
+
+  special_steps : (float * (state -> state)) list ;
+  interventions : event_predicate IntMap.t ;
+  next_intervention_id : int ;
 }
 
 type step =
   | Factual_happened of Trace.step
-  | Factual_did_not_happen of bool * Trace.step
+  | Factual_did_not_happen of (intervention_id list) * Trace.step
   | Counterfactual_happened of Trace.step
+
 
 let debug_print_resimulation_step env f = 
   let open Format in
@@ -503,7 +523,6 @@ let debug_print_resimulation_step env f =
     | Factual_did_not_happen (_blocked, step) ->
       fprintf f "[X] %a" pp_step step
     | Counterfactual_happened step -> fprintf f "[C] %a" pp_step step
-
 
 let actions_of_step = function
   | Trace.Subs _ -> ([],[])
@@ -518,28 +537,30 @@ let time_of_step ~def step =
   | None -> def
   | Some infos -> infos.Trace.Simulation_info.story_time
 
-let step_is_blocked (pred : blocking_predicate option) model step =
-  match pred with
-  | None -> false
-  | Some pred ->
-    let rule_id = 
-      match step with
-      | Trace.Rule (rid, _, _) -> Some rid
-      | _ -> None in
-    let actions = fst (actions_of_step step) in
-    pred model rule_id actions
-
-let simulation_event_is_blocked model = function
+let event_id_of_step step =
+  match Trace.simulation_info_of_step step with
   | None -> None
-  | Some pred -> 
-    Some (fun rule_id _matching actions -> pred model rule_id actions)
+  | Some infos -> Some infos.Trace.Simulation_info.story_event
 
-let set_events_to_block pred state =
-  let pred' = simulation_event_is_blocked state.model pred in
-  { state with
-    events_to_block = pred ;
-    graph = Mri.set_events_to_block pred' state.graph
-  }
+let step_is_blocked_by_predicate (pred : event_predicate) model step =
+  let rule_instance = 
+    match step with
+    | Trace.Rule (rid, _, _) -> Some rid
+    | _ -> None in
+  let actions = fst (actions_of_step step) in
+  let factual_event_id = event_id_of_step step in
+  pred model {rule_instance ; actions ; factual_event_id}
+
+(* Returns [(blocked, blocking)] where [blocked] is true iff the step is 
+   blocked, in which case [blocking] gives the list of blocking 
+   interventions. *)
+let step_is_blocked state step =
+  let blocking =
+    IntMap.fold (fun id pred bs ->
+      if step_is_blocked_by_predicate pred state.model step 
+      then id :: bs else bs) state.interventions [] in
+  (blocking <> []), blocking
+
 
 (** {6 Compute observables to update after a factual step } *)
 
@@ -594,6 +615,57 @@ let debug_print_obs_updates model (obs, deps) =
   Format.printf "@.%a@.@.%d@." pp_obs_list obs (Operator.DepSet.size deps)
 
 
+(** {6 Add and remove interventions } *)
+
+let interventions_updated state =
+  let pred =
+    if IntMap.is_empty state.interventions then None
+    else Some (fun rule_instance _matching actions ->
+      IntMap.exists (fun _ pred ->
+        pred state.model { rule_instance ; actions ; factual_event_id = None }
+      ) state.interventions ) in
+  let graph = Mri.set_events_to_block pred state.graph in
+  { state with graph }
+
+let clear_interventions state = 
+  { state with 
+    interventions = IntMap.empty }
+  |> interventions_updated
+  (* You should not reset [next_intervention_id] (because of [special_steps]) *)
+
+let remove_intervention id state = 
+  { state with interventions = IntMap.remove id state.interventions }
+  |> interventions_updated
+
+let rec insert_special_step (t, f) = function
+  | [] -> [(t, f)]
+  | (t', f') :: steps ->
+    if t <= t' then
+      (t, f) :: (t', f') :: steps
+    else
+      (t', f') :: insert_special_step (t, f) steps
+
+let add_intervention ?timeout pred state =
+  let id = state.next_intervention_id in
+  let next_intervention_id = id + 1 in
+  let interventions = IntMap.add id pred state.interventions in
+
+  let special_steps =
+    match timeout with
+    | None -> state.special_steps
+    | Some t -> 
+      insert_special_step (t, remove_intervention id) state.special_steps in
+
+  let state =
+    { state with next_intervention_id ; interventions  ; special_steps}
+    |> interventions_updated in
+
+  (id, state)
+
+let model state = state.model
+
+let set_max_consecutive_null n state =
+  { state with max_consecutive_null = n }
 
 
 (******************************************************************************)
@@ -607,12 +679,14 @@ let init model random_state =
     graph = Mri.empty ~with_trace:true random_state model counter ;
     ref_state = Replay.init_state ~with_connected_components:true ;
     model ;
-    events_to_block = None ;
+    max_consecutive_null = 3 ;
+    special_steps = [] ;
+    interventions = IntMap.empty ;
+    next_intervention_id = 0 ;
   }
 
 
-
-let do_factual_step blocked step st =
+let do_factual_step step st =
   let ref_state, _ = 
       Replay.do_step (Model.signatures st.model) st.ref_state step in
   let time' = ref_state.Replay.time in
@@ -625,9 +699,11 @@ let do_factual_step blocked step st =
     (New_reference_state (ref_state.Replay.graph, obs)) graph in
   let st = { st with graph ; ref_state } in
 
-  if not (blocked (* || step_is_blocked st.events_to_block st.model step *)) &&
+  let blocked, blocking = step_is_blocked st step in
+
+  if not blocked &&
      Replay.is_step_triggerable_on_edges (Mri.get_edges st.graph) step
-     
+
   then begin
     let graph = Mri.update_edges_from_actions ~outputs:(fun _ -> ())
       (Model.signatures st.model) st.counter (Model.domain st.model)
@@ -638,7 +714,7 @@ let do_factual_step blocked step st =
     Some (Factual_happened step) ,
     update_outdated_activities { st with graph }
   end else begin
-    Some (Factual_did_not_happen (blocked, step)) ,
+    Some (Factual_did_not_happen (blocking, step)) ,
     update_outdated_activities st
   end
 
@@ -650,15 +726,19 @@ let do_counterfactual_step dt st =
     | Data.TraceStep step -> gen_step := Some (Counterfactual_happened step)
     | _ -> () in
   let applied_rule, _, graph =
-    Mri.apply_rule ~outputs:receive_step ~maxConsecutiveClash:3 
+    Mri.apply_rule 
+      ~outputs:receive_step 
+      ~maxConsecutiveClash:st.max_consecutive_null
       st.model st.counter st.graph in
   let graph = Mri.send_instances_message 
     (New_cur_mixture (Mri.get_edges graph)) graph in
   let graph = Mri.send_instances_message Flush_roots_buffer graph in
   let st = { st with graph } in
-  if applied_rule = None then !gen_step, st (* null_event *) 
+  Counter.one_time_advance st.counter dt ;
+  if applied_rule = None then (* null_event *)
+    (* No need to register the null event: this is done by [Mri.apply_rule] *)
+    !gen_step, st 
   else begin
-    Counter.one_time_advance st.counter dt ;
     !gen_step, update_outdated_activities st
   end
 
@@ -670,14 +750,16 @@ type next_step_kind =
 
 exception End_of_resimulation
 
-let do_step next_ref_step_opt st =
+let do_step 
+  ?(do_before_factual = const identity) 
+  next_fstep_opt st =
 
-  let get_next_ref_step, next_ref_step_time, block_next_ref_step =
-    match next_ref_step_opt with
-    | None -> (fun () -> assert false), infinity, false
-    | Some (s, b) -> 
+  let get_next_fstep, next_fstep_time =
+    match next_fstep_opt with
+    | None -> (fun () -> assert false), infinity
+    | Some s ->
       let t = time_of_step ~def:(st.ref_state.Replay.time) s in
-      (fun () -> s), t, b in
+      (fun () -> s), t in
 
   let div_activity = Mri.activity st.graph in
   let rd = Random.State.float (Mri.get_random_state st.graph) 1.0 in
@@ -685,8 +767,8 @@ let do_step next_ref_step_opt st =
   let next_div_step_time = time st +. dt in
  
   let time', next_step_kind =
-    if next_ref_step_time <= next_div_step_time
-    then next_ref_step_time, Next_is_factual
+    if next_fstep_time <= next_div_step_time
+    then next_fstep_time, Next_is_factual
     else next_div_step_time, Next_is_counterfactual in
   
   if time' = infinity then raise End_of_resimulation
@@ -695,32 +777,46 @@ let do_step next_ref_step_opt st =
     | Next_is_counterfactual ->
       let step, st = do_counterfactual_step dt st in
       false, step, st
-    | Next_is_factual -> 
-      let step, st = do_factual_step block_next_ref_step (get_next_ref_step ()) st in
+    | Next_is_factual ->
+      let next_fstep = get_next_fstep () in
+      let st = do_before_factual next_fstep st in
+      let step, st = do_factual_step next_fstep st in
       true, step, st
 
 
 
-let rec loop_until_consummed ~stop emit next_ref_step_opt st =
-  let consummed, opt_step, st = do_step next_ref_step_opt st in
-  begin match opt_step with
-  | None -> ()
-  | Some step -> (emit step ; if stop step then raise End_of_resimulation)
-  end ;
-  if consummed then st
-  else loop_until_consummed ~stop emit next_ref_step_opt st
+(* TODO: continue after the factual trace is consumed. *)
+let resimulate 
+  ?(do_init = identity)
+  ?(do_before_factual = const identity)
+  ?(do_after_step = const identity)
+  ?(handle_null_event = const ())
+  ?(handle_step = const2 ())
+  ?(stop_after = const2 false)
+  trace_file =
 
+  let state model =
+    init model (Random.get_state ()) |> do_init in
+  
+  let rec until_factual_consumed next_fstep_opt state =
+    let consumed, ostep, state = 
+      do_step ~do_before_factual next_fstep_opt state in
+    let state = 
+      match ostep with
+      | None -> 
+        handle_null_event () ; 
+        state
+      | Some step ->
+        handle_step state.model step ;
+        let state = do_after_step step state in
+        if stop_after state.model step then raise End_of_resimulation
+        else state in
+    if consumed then state
+    else until_factual_consumed next_fstep_opt state in
 
-let resimulate ?stop_after:(stop=fun _ -> false) ~blocked ~rcv_step trace_file =
-  let state model = 
-    init model (Random.get_state ())
-    |> set_events_to_block (Some blocked) in
-  let emit model rs = rcv_step model rs in
   try
-    trace_file |> Trace.fold_trace_file (fun model st step ->
-      let blocked = step_is_blocked st.events_to_block st.model step in
-      let next = (step, blocked) in
-      loop_until_consummed ~stop (emit model) (Some next) st
+    trace_file |> Trace.fold_trace_file (fun _ st step ->
+      until_factual_consumed (Some step) st
     ) state
     |> ignore
   with End_of_resimulation -> ()

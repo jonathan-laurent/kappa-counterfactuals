@@ -15,34 +15,44 @@
 
 type state
 
+type intervention_id
+
 type step =
   | Factual_happened of Trace.step
-  | Factual_did_not_happen of bool * Trace.step
+  | Factual_did_not_happen of (intervention_id list) * Trace.step
   | Counterfactual_happened of Trace.step
 
 val debug_print_resimulation_step : Model.t -> Format.formatter -> step -> unit
 
 exception End_of_resimulation
 
-type blocking_predicate =
-  Model.t -> 
-  int option -> 
-  (* Matching.t -> *) (* TODO *)
-  (Instantiation.concrete Instantiation.action) list -> 
-  bool
-(** [pred rule_id actions] *)
+type event_properties = {
+  rule_instance: int option ;
+  actions: (Instantiation.concrete Instantiation.action) list ;
+  factual_event_id: int option ;
+}
 
-val set_events_to_block : blocking_predicate option -> state -> state
-(** Registers a predicate that is used to specify events
-    that will be blocked in the counterfactual world.
-    If [None] is given, nothing will be blocked. *)
+type event_predicate = Model.t -> event_properties -> bool
+
+val clear_interventions : state -> state
+
+val add_intervention :
+  ?timeout:float -> event_predicate -> state -> intervention_id * state
+(** if provided, [timeout] is the time at which the 
+    intervention gets deactivated *)
+
+val remove_intervention : intervention_id -> state -> state
+
+val model : state -> Model.t
+
+val set_max_consecutive_null : int -> state -> state
 
 
 val init : Model.t -> Random.State.t -> state
 
 val do_step :
-  (Trace.step * bool) option -> state -> 
-  bool * step option * state
+  ?do_before_factual:(Trace.step -> state -> state) ->
+  Trace.step option -> state -> bool * step option * state
 (** [do_step next_reference_step state]
     @return [(reference_step_consummed, counterfactual_step, new_state)]
 
@@ -60,12 +70,11 @@ val do_step :
 
 
 val resimulate : 
-  ?stop_after:(step -> bool) ->
-  blocked:blocking_predicate -> 
-  rcv_step:(Model.t -> step -> unit) ->
-  string -> unit
-(** [resimulate ?stop_after ~blocked ~rcv_step trace_file]
-
-    Resimulates the trace contained in [trace_file], blocking
-    steps for which predicate [blocked] is true. Resimulation
-    steps are communicated throug the [rcv_step] handler. *)
+  ?do_init:(state -> state) ->
+  ?do_before_factual:(Trace.step -> state -> state) ->
+  ?do_after_step:(step -> state -> state) ->
+  ?handle_null_event:(unit -> unit) ->
+  ?handle_step:(Model.t -> step -> unit) ->
+  ?stop_after:(Model.t -> step -> bool) ->
+  string ->
+  unit
