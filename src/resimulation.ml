@@ -889,6 +889,26 @@ let debug_print_obs_updates model (obs, deps) =
 
 (** {6 Add and remove interventions } *)
 
+let merge_interventions interventions =
+  let interventions = 
+    IntMap.bindings interventions 
+    |> List.map (fun (_, i) -> i) in
+
+  let rules_to_monitor =
+    interventions
+    |> List.map (fun i -> i.rules_to_monitor)
+    |> List.concat
+    |> List.sort_uniq compare in
+
+  let block model e =
+    List.exists (fun i -> i.block model e) interventions in
+
+  let block_partial model graph pe =
+    List.exists (fun i -> i.block_partial model graph pe) interventions in
+  
+  { rules_to_monitor ; block ; block_partial }
+
+
 (* TODO: the fun part happens here... *)
 let interventions_updated state =
   let pred =

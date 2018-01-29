@@ -9,6 +9,6 @@ clean:
 	rm -f tests/*.json tests/input*
 
 test: all
-	cd tests ; KaSim test.ka -var VA 100 -trace t.json 
+	cd tests ; KaSim test.ka -var VA 1 -trace t.json 
 	./resimulate -b b tests/t.json --stats stats
 	cat stats

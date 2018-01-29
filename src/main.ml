@@ -45,6 +45,8 @@ let intervention model rule_name =
     match e.rule_instance with
     | None -> false
     | Some r -> List.mem r rules_to_monitor in
+  (*Printf.printf "# Rules to monitor: %d\n" 
+    (List.length rules_to_monitor) ; *)
   { rules_to_monitor ; block_partial ; block }
 
 
