@@ -45,7 +45,7 @@ val remove_intervention : intervention_id -> state -> state
 
 val model : state -> Model.t
 
-val set_max_consecutive_null : int -> state -> state
+val set_max_consecutive_null : int option -> state -> state
 
 
 val init : Model.t -> Random.State.t -> state

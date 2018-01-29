@@ -111,6 +111,7 @@ module Util = struct
 
   module Int = struct type t = int let compare = compare end
   module IntMap = Map.Make(Int)
+  module IntSet = Set.Make(Int)
 
   let identity x = x
 
@@ -127,6 +128,9 @@ open Util
 (* DIVERGENT INSTANCES                                                        *)
 (******************************************************************************)
 
+type partial_block_predicate = int -> Edges.t -> Pattern.id -> int -> bool
+(* [block_partial rule_id graph pat_id root] *)
+
 type div_instances_message =
     | New_cur_mixture of Edges.t
     (** This message is sent when the current mixture is updated.
@@ -142,32 +146,46 @@ type div_instances_message =
     (** Calls to [Divergent_instances.update_roots] are put in a cache
         and executed when this message is received *)
 
+    | Set_intervention of int list * partial_block_predicate
+    (** This message is sent when an intervention is added or removed.
+        It contains:
+        + A list of rules for which a dedicated instances datastructure
+          is prefred
+        + A partial blocking predicate *)
 
-module Divergent_instances 
-: Instances_sig.S with type message = div_instances_message =
+
+type mod_ccs_cache = (int, unit) Hashtbl.t
+
+type divergent_instances = {
+  conv_roots : Roots.t ;
+  div_roots  : Roots.t ;
+
+  reference_mixture : Edges.t ;
+  current_mixture : Edges.t ;
+  (* Has to be updated at each event loop using `send_message` *)
+
+  precomputed_unary_patterns : Pattern.Set.t ;
+  (* Useful to call `update_roots` in *)
+  
+  domain : Pattern.Env.t ;
+  (* The domain has to be stored in [t] because of 
+      the `is_divergent` function. *)
+
+  roots_buffer : (bool * mod_ccs_cache * Pattern.id * int) Queue.t
+  (* Calls to [Divergent_instances.update_roots] are put in this cache
+      and executed when the message [Flush_roots_buffer] is received *)
+}
+
+module type DIVERGENT_INSTANCES = 
+  Instances_sig.S with type message = div_instances_message
+
+module type DIVERGENT_INSTANCES_TRANSPARENT =
+  DIVERGENT_INSTANCES with type t = divergent_instances
+
+module Divergent_instances : DIVERGENT_INSTANCES_TRANSPARENT =
 struct
 
-  type mod_ccs_cache = (int, unit) Hashtbl.t
-
-  type t = {
-    conv_roots : Roots.t ;
-    div_roots  : Roots.t ;
-
-    reference_mixture : Edges.t ;
-    current_mixture : Edges.t ;
-    (* Has to be updated at each event loop using `send_message` *)
-
-    precomputed_unary_patterns : Pattern.Set.t ;
-    (* Useful to call `update_roots` in  *)
-    
-    domain : Pattern.Env.t ;
-    (* The domain has to be stored in [t] because of 
-       the `is_divergent` function. *)
-
-    roots_buffer : (bool * mod_ccs_cache * Pattern.id * int) Queue.t
-    (* Calls to [Divergent_instances.update_roots] are put in this cache
-       and executed when the message [Flush_roots_buffer] is received *)
-  }
+  type t = divergent_instances
 
   let break_apart_cc insts graph cache ccs =
     let conv_roots = Roots.break_apart_cc insts.conv_roots graph cache ccs in
@@ -179,13 +197,13 @@ struct
     let div_roots  = Roots.merge_cc insts.div_roots cache ccs in
     { insts with conv_roots ; div_roots }
 
-  let empty env =
+  let empty model =
     { reference_mixture = Edges.empty ~with_connected_components:true ; 
       current_mixture = Edges.empty ~with_connected_components:true ;
-      domain = Model.domain env ;
-      precomputed_unary_patterns = Model.unary_patterns env ;
-      conv_roots = Roots.empty env ;
-      div_roots = Roots.empty env ;
+      domain = Model.domain model ;
+      precomputed_unary_patterns = Model.unary_patterns model ;
+      conv_roots = Roots.empty model ;
+      div_roots = Roots.empty model ;
       roots_buffer = Queue.create () }
 
   let debug_print fmt insts = 
@@ -283,6 +301,7 @@ struct
           Queue.clear st.roots_buffer ;
           st
         end
+      | Set_intervention _ -> st
 
   let get_unary_maps st (pat1, pat2) =
     let map1_conv = Roots.of_unary_pattern pat1 st.conv_roots in
@@ -294,7 +313,7 @@ struct
 
   (** {6 Counting instances } *)
 
-  let number_of_instances insts pats =
+  let number_of_instances ?rule_id:_ insts pats =
     let cc_counts xs = 
       Array.map (fun pat -> Roots.number xs pat) pats in
     let convs = cc_counts insts.conv_roots in
@@ -302,7 +321,7 @@ struct
     array_product (array_zip_with (+) convs divs) - array_product convs
 
 
-  let number_of_unary_instances_in_cc st (pat1, pat2) = 
+  let number_of_unary_instances_in_cc ?rule_id:_ st (pat1, pat2) = 
     let map1_conv, map2_conv, map1_div, map2_div = 
         get_unary_maps st (pat1, pat2) in
     fun cc -> 
@@ -344,7 +363,7 @@ struct
     |> Array.map (Option_util.unsome (-1))
 
 
-  let pick_unary_instance_in_cc st random_state (pat1, pat2) =
+  let pick_unary_instance_in_cc ?rule_id:_ st random_state (pat1, pat2) =
     let map1_conv, map2_conv, map1_div, map2_div = 
       get_unary_maps st (pat1, pat2) in
     fun cc ->
@@ -356,7 +375,7 @@ struct
       roots.(0), roots.(1)
 
   
-  let fold_picked_instance st random_state pats ~init f =
+  let fold_picked_instance ?rule_id:_ st random_state pats ~init f =
     let conv_sets =
       Array.map (fun pat_id -> Roots.of_pattern pat_id st.conv_roots) pats in
     let div_sets = 
@@ -378,7 +397,6 @@ struct
 
 
   (** {6 Enumerating instances } *)
-
 
   module Pat = struct
     type t = int array
@@ -457,9 +475,8 @@ struct
         then set.(i) <- int_collection_singleton root
         else set.(i) <- IntCollection.create 0
       )
-
   
-  let fold_instances ?excp st pats ~init f =
+  let fold_instances ?rule_id:_ ?excp st pats ~init f =
     let conv_sets = 
       Array.map (fun pat_id -> Roots.of_pattern pat_id st.conv_roots) pats in
     let div_sets = 
@@ -482,7 +499,7 @@ struct
     ) init all_keys
 
 
-  let fold_unary_instances st (pat1, pat2) ~init f =
+  let fold_unary_instances ?rule_id:_ st (pat1, pat2) ~init f =
      let map1_conv, map2_conv, map1_div, map2_div = get_unary_maps st (pat1, pat2) in
      map_fold4 ~def:Mods.IntSet.empty map1_conv map2_conv map1_div map2_div ~init 
       (fun _ rts1_conv rts2_conv rts1_div rts2_div acc ->
@@ -497,11 +514,227 @@ end
 
 
 (******************************************************************************)
+(* PER-RULE DIVERGENT INSTANCES                                               *)
+(******************************************************************************)
+
+module type RULE_PATS = sig
+  type t
+  val init : Model.t -> t
+  val reset : t -> t
+  val follow_rule : int -> t -> t
+  val fold_rules : pat:Pattern.id -> init:'a -> (int -> 'a -> 'a) -> t -> 'a
+  val fold_pats : rule_id:int -> init:'a -> (Pattern.id -> 'a -> 'a) -> t -> 'a
+  val iter_rules : pat:Pattern.id -> (int -> unit) -> t -> unit
+  val iter_pats : rule_id:int -> (Pattern.id -> unit) -> t -> unit
+end
+
+module Rule_pats : RULE_PATS =
+struct
+
+  module PSet = Pattern.Set
+  module PMap = Pattern.Map
+
+  type t = {
+    rule_to_pats : PSet.t array ;
+    pat_to_rules : IntSet.t PMap.t ;
+  }
+
+  let init model =
+    let pats_set rule =
+      Array.fold_left (fun acc pat_id ->
+        PSet.add pat_id acc
+      ) PSet.empty rule.Primitives.connected_components in
+    let rule_to_pats = Array.map pats_set (Model.get_rules model) in
+    { rule_to_pats ; pat_to_rules = PMap.empty }
+
+  let reset t = { t with pat_to_rules = PMap.empty }
+
+  let follow_rule r t =
+    let pats = t.rule_to_pats.(r) in
+    let pat_to_rules =
+      PSet.fold (fun pat_id pat_to_rules ->
+        let rs = PMap.find_default IntSet.empty pat_id pat_to_rules in
+        let rs = IntSet.add r rs in
+        PMap.add pat_id rs pat_to_rules
+      ) pats t.pat_to_rules in
+    { t with pat_to_rules }
+
+  let fold_rules ~pat ~init f t =
+    match PMap.find_option pat t.pat_to_rules with
+    | None -> init
+    | Some rs -> IntSet.fold f rs init
+
+  let fold_pats ~rule_id ~init f t =
+    PSet.fold f (t.rule_to_pats.(rule_id)) init
+
+  let iter_rules ~pat f t =
+    fold_rules ~pat ~init:() (fun r () -> f r) t
+
+  let iter_pats ~rule_id f t =
+    fold_pats ~rule_id ~init:() (fun p () -> f p) t
+
+end
+
+
+module Per_rule (Div : DIVERGENT_INSTANCES_TRANSPARENT) : DIVERGENT_INSTANCES =
+struct
+
+  type t = 
+    { def : Div.t ;
+      rule : Div.t IntMap.t ;
+      rule_pats : Rule_pats.t ;
+      model : Model.t ;
+      block_partial : partial_block_predicate }
+
+  type message = div_instances_message
+
+  let debug_print _f _t = assert false (* TODO *)
+
+  let block_nothing _ _ _ _ = false
+
+  let update_all f t =
+    { t with def = f t.def ; rule = IntMap.map f t.rule }
+
+  let receive_message msg = update_all (Div.receive_message msg)
+
+  let empty model = 
+    { def = Div.empty model ;
+      rule = IntMap.empty ;
+      rule_pats = Rule_pats.init model ;
+      model ;
+      block_partial = block_nothing }
+
+  (* Copy a divergent instance *)
+  let empty_copy model insts =
+    { reference_mixture = insts.reference_mixture ;
+      current_mixture = insts.current_mixture ;
+      domain = insts.domain ;
+      precomputed_unary_patterns = insts.precomputed_unary_patterns ;
+      roots_buffer = Queue.copy insts.roots_buffer ;
+      div_roots = Roots.empty model ;
+      conv_roots = Roots.empty model }
+
+
+
+  let initialize_specialized_instances ~rule_id src dest pat_id blocked =
+    let graph = src.current_mixture in
+    let pre = src.precomputed_unary_patterns in
+    let cache = Hashtbl.create 10 in
+
+    let maybe_add root =
+      if not (blocked rule_id graph pat_id root) then
+        Div.update_roots dest true pre graph cache pat_id root in
+
+    (* Patterns *)
+    let conv_roots = Roots.of_pattern pat_id src.conv_roots in
+    let div_roots = Roots.of_pattern pat_id src.div_roots in
+    let process_roots roots =
+      IntCollection.fold (fun root _ ->
+      maybe_add root
+      ) roots () in
+    process_roots conv_roots ;
+    process_roots div_roots ;
+
+    (* Unary patterns *)
+    let conv_roots = Roots.of_unary_pattern pat_id src.conv_roots in
+    let div_roots = Roots.of_unary_pattern pat_id src.div_roots in
+    let process_ccs_roots ccs_roots =
+      ccs_roots |> Mods.IntMap.iter (fun _ roots ->
+        roots |> Mods.IntSet.iter (fun root ->
+          maybe_add root
+        )
+      ) in
+    process_ccs_roots conv_roots ;
+    process_ccs_roots div_roots
+
+
+  let set_intervention rules block_partial t =
+
+    let rule_pats =
+      rules |> List.fold_left (fun rule_pats r ->
+        Rule_pats.follow_rule r rule_pats
+      ) (Rule_pats.reset t.rule_pats) in
+
+    let rule =
+      rules |> List.fold_left (fun rule rule_id ->
+        let insts = empty_copy t.model t.def in
+        t.rule_pats |> Rule_pats.iter_pats ~rule_id (fun pat_id ->
+          initialize_specialized_instances 
+            ~rule_id t.def insts pat_id block_partial
+        ) ;
+        IntMap.add rule_id insts rule
+      ) IntMap.empty in
+    
+    { t with rule ; rule_pats ; block_partial }
+      
+
+
+  let incorporate_extra_pattern _ _ _ = assert false (* TODO *)
+
+  let break_apart_cc t graph cache ccs =
+    update_all (fun t -> Div.break_apart_cc t graph cache ccs) t
+
+  let merge_cc t cache ccs =
+    update_all (fun t -> Div.merge_cc t cache ccs) t
+
+  let update_roots t is_positive_update unary_pats graph cache id root =
+    Div.update_roots t.def is_positive_update unary_pats graph cache id root ;
+    t.rule_pats |> Rule_pats.iter_rules ~pat:id (fun rule ->
+      (* For each affected rule: 
+           + if positive update: transmit if not blocked
+           + otherwise, transmit *)
+      match IntMap.find_opt rule t.rule with
+      | None -> ()
+      | Some insts ->
+        if not (is_positive_update && t.block_partial rule graph id root) then
+          Div.update_roots 
+            insts is_positive_update unary_pats graph cache id root
+    )
+
+  let query ?rule_id f t =
+    match rule_id with
+    | None -> f t.def
+    | Some r ->
+      begin match IntMap.find_opt r t.rule with
+      | None -> f t.def
+      | Some insts -> f insts
+      end
+
+  let number_of_instances ?rule_id t pats =
+    t |> query ?rule_id (fun t -> Div.number_of_instances ?rule_id t pats)
+  
+  let number_of_unary_instances_in_cc ?rule_id t (pat1, pat2) =
+    t |> query ?rule_id (fun t -> 
+      Div.number_of_unary_instances_in_cc ?rule_id t (pat1, pat2))
+
+  let pick_unary_instance_in_cc ?rule_id t random_state (pat1, pat2) =
+    t |> query ?rule_id (fun t -> 
+      Div.pick_unary_instance_in_cc ?rule_id t random_state (pat1, pat2))
+  
+  let fold_picked_instance ?rule_id t random_state pats ~init f =
+    t |> query ?rule_id (fun t -> 
+      Div.fold_picked_instance ?rule_id t random_state pats ~init f)
+
+  let fold_instances ?rule_id ?excp t pats ~init f =
+    t |> query ?rule_id (fun t -> 
+      Div.fold_instances ?rule_id ?excp t pats ~init f)
+  
+  let fold_unary_instances ?rule_id t (pat1, pat2) ~init f =
+    t |> query ?rule_id (fun t -> 
+      Div.fold_unary_instances ?rule_id t (pat1, pat2) ~init f)
+
+end
+
+(******************************************************************************)
 (* RESIMULATION TYPES AND HELPERS                                             *)
 (******************************************************************************)
 
+(* module Instances = Divergent_instances *)
+
+module Instances = Per_rule(Divergent_instances)
+
 module Modified_rule_interpreter = 
-  Generic_rule_interpreter.Make(Divergent_instances)
+  Generic_rule_interpreter.Make(Instances)
 
 module Mri = Modified_rule_interpreter
 
@@ -520,9 +753,10 @@ type state = {
   ref_state : Replay.state ;
   counter : Counter.t ;
   model : Model.t ;
-  max_consecutive_null : int ;
+  max_consecutive_null : int option ;
 
   special_steps : (float * (state -> state)) list ;
+  (* TODO: implement special steps *)
   interventions : event_predicate IntMap.t ;
   next_intervention_id : int ;
 }
@@ -698,7 +932,7 @@ let init model random_state =
     graph = Mri.empty ~with_trace:true random_state model counter ;
     ref_state = Replay.init_state ~with_connected_components:true ;
     model ;
-    max_consecutive_null = 3 ;
+    max_consecutive_null = None ;
     special_steps = [] ;
     interventions = IntMap.empty ;
     next_intervention_id = 0 ;
@@ -727,6 +961,11 @@ let do_factual_step step st =
     let graph = Mri.update_edges_from_actions ~outputs:(fun _ -> ())
       (Model.signatures st.model) st.counter (Model.domain st.model)
       st.graph (actions_of_step step) in
+    (* This function makes calls to Instances.update_roots.
+       We want to defer these calls to the moment where the
+       edges are fully updated, so that we can know which
+       sites are divergent and which sites are not.
+       This is why we use the [Flush_roots_buffer] trick. *)
     let graph = Mri.send_instances_message 
         (New_cur_mixture (Mri.get_edges graph)) graph in
     let graph = Mri.send_instances_message Flush_roots_buffer graph in
@@ -747,7 +986,8 @@ let do_counterfactual_step dt st =
   let applied_rule, _, graph =
     Mri.apply_rule 
       ~outputs:receive_step 
-      ~maxConsecutiveClash:st.max_consecutive_null
+      ~maxConsecutiveClash:3
+      ?maxConsecutiveBlocked:st.max_consecutive_null
       st.model st.counter st.graph in
   let graph = Mri.send_instances_message 
     (New_cur_mixture (Mri.get_edges graph)) graph in

@@ -15,14 +15,14 @@ let output = ref ""
 
 let stats_file = ref ""
 
-let max_consecutive_null = ref 2
+let max_consecutive_null = ref None
 
 let options = [
   "-b", Arg.Set_string blocked, 
   "rule to block" ;
   "-o", Arg.Set_string output, 
   "output file for the counterfactual trace" ;
-  "--max-consecutive-null", Arg.Set_int max_consecutive_null,
+  "--max-consecutive-null", Arg.Int (fun i -> max_consecutive_null := Some i),
   "maximal number of consecutive null events" ;
   "--stats", Arg.Set_string stats_file,
   "file in which to dump statistics on resimulation"
@@ -68,7 +68,7 @@ let () =
           (Resimulation.debug_print_resimulation_step model) step in
       let handle_null_event () = 
         incr n_null ;
-        Format.fprintf f "[N] {%d}@;" !n_null in
+        Format.fprintf f "[N] %d@;" !n_null in
       Format.fprintf f "@[<v>" ;
       resimulate ~do_init ~handle_step ~handle_null_event !trace_file ;
       Format.fprintf f "@]@." 
