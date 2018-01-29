@@ -128,8 +128,13 @@ open Util
 (* DIVERGENT INSTANCES                                                        *)
 (******************************************************************************)
 
-type partial_block_predicate = int -> Edges.t -> Pattern.id -> int -> bool
-(* [block_partial rule_id graph pat_id root] *)
+type partial_event = 
+  { pe_rule_instance: int ;
+    pe_pat: Pattern.id ;
+    pe_root: int }
+
+type partial_event_predicate =
+  Model.t -> Edges.t -> partial_event -> bool
 
 type div_instances_message =
     | New_cur_mixture of Edges.t
@@ -146,7 +151,7 @@ type div_instances_message =
     (** Calls to [Divergent_instances.update_roots] are put in a cache
         and executed when this message is received *)
 
-    | Set_intervention of int list * partial_block_predicate
+    | Set_intervention of int list * partial_event_predicate
     (** This message is sent when an intervention is added or removed.
         It contains:
         + A list of rules for which a dedicated instances datastructure
@@ -584,13 +589,13 @@ struct
       rule : Div.t IntMap.t ;
       rule_pats : Rule_pats.t ;
       model : Model.t ;
-      block_partial : partial_block_predicate }
+      block_partial : partial_event_predicate }
 
   type message = div_instances_message
 
   let debug_print _f _t = assert false (* TODO *)
 
-  let block_nothing _ _ _ _ = false
+  let block_nothing _ _ _ = false
 
   let update_all f t =
     { t with def = f t.def ; rule = IntMap.map f t.rule }
@@ -616,13 +621,17 @@ struct
 
 
 
-  let initialize_specialized_instances ~rule_id src dest pat_id blocked =
+  let initialize_specialized_instances ~model ~rule_id src dest pat_id blocked =
     let graph = src.current_mixture in
     let pre = src.precomputed_unary_patterns in
     let cache = Hashtbl.create 10 in
 
     let maybe_add root =
-      if not (blocked rule_id graph pat_id root) then
+      let pe = 
+        { pe_rule_instance = rule_id ;
+          pe_pat = pat_id ;
+          pe_root = root } in
+      if not (blocked model graph pe) then
         Div.update_roots dest true pre graph cache pat_id root in
 
     (* Patterns *)
@@ -660,7 +669,7 @@ struct
         let insts = empty_copy t.model t.def in
         t.rule_pats |> Rule_pats.iter_pats ~rule_id (fun pat_id ->
           initialize_specialized_instances 
-            ~rule_id t.def insts pat_id block_partial
+            ~model:t.model ~rule_id t.def insts pat_id block_partial
         ) ;
         IntMap.add rule_id insts rule
       ) IntMap.empty in
@@ -686,7 +695,11 @@ struct
       match IntMap.find_opt rule t.rule with
       | None -> ()
       | Some insts ->
-        if not (is_positive_update && t.block_partial rule graph id root) then
+        let pe =
+          { pe_rule_instance = rule ;
+            pe_pat = id ;
+            pe_root = root } in
+        if not (is_positive_update && t.block_partial t.model graph pe) then
           Div.update_roots 
             insts is_positive_update unary_pats graph cache id root
     )
@@ -748,6 +761,12 @@ type event_predicate = Model.t -> event_properties -> bool
 
 type intervention_id = int
 
+type intervention = {
+  block: event_predicate ;
+  block_partial: partial_event_predicate ;
+  rules_to_monitor: int list ;
+}
+
 type state = {
   graph : Modified_rule_interpreter.t ;
   ref_state : Replay.state ;
@@ -757,7 +776,7 @@ type state = {
 
   special_steps : (float * (state -> state)) list ;
   (* TODO: implement special steps *)
-  interventions : event_predicate IntMap.t ;
+  interventions : intervention IntMap.t ;
   next_intervention_id : int ;
 }
 
@@ -809,8 +828,8 @@ let step_is_blocked_by_predicate (pred : event_predicate) model step =
    interventions. *)
 let step_is_blocked state step =
   let blocking =
-    IntMap.fold (fun id pred bs ->
-      if step_is_blocked_by_predicate pred state.model step 
+    IntMap.fold (fun id intervention bs ->
+      if step_is_blocked_by_predicate intervention.block state.model step 
       then id :: bs else bs) state.interventions [] in
   (blocking <> []), blocking
 
@@ -870,12 +889,14 @@ let debug_print_obs_updates model (obs, deps) =
 
 (** {6 Add and remove interventions } *)
 
+(* TODO: the fun part happens here... *)
 let interventions_updated state =
   let pred =
     if IntMap.is_empty state.interventions then None
     else Some (fun rule_instance _matching actions ->
-      IntMap.exists (fun _ pred ->
-        pred state.model { rule_instance ; actions ; factual_event_id = None }
+      IntMap.exists (fun _ intervention ->
+        intervention.block state.model 
+          { rule_instance ; actions ; factual_event_id = None }
       ) state.interventions ) in
   let graph = Mri.set_events_to_block pred state.graph in
   { state with graph }
@@ -898,10 +919,10 @@ let rec insert_special_step (t, f) = function
     else
       (t', f') :: insert_special_step (t, f) steps
 
-let add_intervention ?timeout pred state =
+let add_intervention ?timeout intervention state =
   let id = state.next_intervention_id in
   let next_intervention_id = id + 1 in
-  let interventions = IntMap.add id pred state.interventions in
+  let interventions = IntMap.add id intervention state.interventions in
 
   let special_steps =
     match timeout with

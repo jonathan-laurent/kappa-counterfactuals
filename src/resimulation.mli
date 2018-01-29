@@ -26,6 +26,7 @@ val debug_print_resimulation_step : Model.t -> Format.formatter -> step -> unit
 
 exception End_of_resimulation
 
+
 type event_properties = {
   rule_instance: int option ;
   actions: (Instantiation.concrete Instantiation.action) list ;
@@ -34,10 +35,25 @@ type event_properties = {
 
 type event_predicate = Model.t -> event_properties -> bool
 
+type partial_event = {
+  pe_rule_instance: int ;
+  pe_pat: Pattern.id ;
+  pe_root: int 
+}
+
+type partial_event_predicate =
+  Model.t -> Edges.t -> partial_event -> bool
+
+type intervention = {
+  block: event_predicate ;
+  block_partial: partial_event_predicate ;
+  rules_to_monitor: int list ;
+}
+
 val clear_interventions : state -> state
 
 val add_intervention :
-  ?timeout:float -> event_predicate -> state -> intervention_id * state
+  ?timeout:float -> intervention -> state -> intervention_id * state
 (** if provided, [timeout] is the time at which the 
     intervention gets deactivated *)
 

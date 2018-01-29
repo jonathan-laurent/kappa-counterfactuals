@@ -28,12 +28,25 @@ let options = [
   "file in which to dump statistics on resimulation"
 ]
 
+let rules_of_name name model =
+  Model.fold_rules (fun i acc _r ->
+    if Format.asprintf "%a" (Model.print_rule ~env:model) i = name
+    then i :: acc else acc
+  ) [] model
+
 let anon_arg f = trace_file := f
 
-let blocked model {rule_instance ; _} = 
-  match rule_instance with
-  | None -> false
-  | Some r -> Format.asprintf "%a" (Model.print_rule ~env:model) r = !blocked
+let intervention model rule_name =
+  let rules_to_monitor = 
+    rules_of_name rule_name model in
+  let block_partial _ _ pe = 
+    List.mem pe.pe_rule_instance rules_to_monitor in
+  let block _ e =
+    match e.rule_instance with
+    | None -> false
+    | Some r -> List.mem r rules_to_monitor in
+  { rules_to_monitor ; block_partial ; block }
+
 
 let with_file filename f =
   if filename = "" then f Format.std_formatter
@@ -54,7 +67,8 @@ let () =
     let n_common = ref 0 in
 
     let do_init state =
-      snd (add_intervention blocked state)
+      let intervention = intervention (model state) !blocked in
+      snd (add_intervention intervention state)
       |> set_max_consecutive_null !max_consecutive_null in
 
     with_file !output (fun f ->
