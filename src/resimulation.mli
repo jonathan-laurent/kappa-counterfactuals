@@ -30,6 +30,7 @@ exception End_of_resimulation
 type event_properties = {
   rule_instance: int option ;
   actions: (Instantiation.concrete Instantiation.action) list ;
+  tests: (Instantiation.concrete Instantiation.test) list ;
   factual_event_id: int option ;
 }
 
@@ -63,6 +64,7 @@ val model : state -> Model.t
 
 val set_max_consecutive_null : int option -> state -> state
 
+val set_use_specialized_instances : bool -> state -> state
 
 val init : Model.t -> Random.State.t -> state
 

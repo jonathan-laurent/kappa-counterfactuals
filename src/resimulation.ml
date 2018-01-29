@@ -123,10 +123,18 @@ end
 
 open Util
 
+(******************************************************************************)
+(* INTERVENTIONS                                                              *)
+(******************************************************************************)
 
-(******************************************************************************)
-(* DIVERGENT INSTANCES                                                        *)
-(******************************************************************************)
+type event_properties = {
+  rule_instance: int option ;
+  actions: (Instantiation.concrete Instantiation.action) list ;
+  tests: (Instantiation.concrete Instantiation.test) list ;
+  factual_event_id: int option ;
+}
+
+type event_predicate = Model.t -> event_properties -> bool
 
 type partial_event = 
   { pe_rule_instance: int ;
@@ -135,6 +143,38 @@ type partial_event =
 
 type partial_event_predicate =
   Model.t -> Edges.t -> partial_event -> bool
+
+type intervention_id = int
+
+type intervention = {
+  block: event_predicate ;
+  block_partial: partial_event_predicate ;
+  rules_to_monitor: int list ;
+}
+
+let merge_interventions interventions =
+  let interventions = 
+    IntMap.bindings interventions 
+    |> List.map (fun (_, i) -> i) in
+
+  let rules_to_monitor =
+    interventions
+    |> List.map (fun i -> i.rules_to_monitor)
+    |> List.concat
+    |> List.sort_uniq compare in
+
+  let block model e =
+    List.exists (fun i -> i.block model e) interventions in
+
+  let block_partial model graph pe =
+    List.exists (fun i -> i.block_partial model graph pe) interventions in
+  
+  { rules_to_monitor ; block ; block_partial }
+
+
+(******************************************************************************)
+(* DIVERGENT INSTANCES                                                        *)
+(******************************************************************************)
 
 type div_instances_message =
     | New_cur_mixture of Edges.t
@@ -151,12 +191,9 @@ type div_instances_message =
     (** Calls to [Divergent_instances.update_roots] are put in a cache
         and executed when this message is received *)
 
-    | Set_intervention of int list * partial_event_predicate
-    (** This message is sent when an intervention is added or removed.
-        It contains:
-        + A list of rules for which a dedicated instances datastructure
-          is prefred
-        + A partial blocking predicate *)
+    | Set_intervention of bool * intervention
+    (** This message is sent when a new intervention is set. 
+        The boolean is true iff specialized instances should be used. *)
 
 
 type mod_ccs_cache = (int, unit) Hashtbl.t
@@ -268,10 +305,12 @@ struct
   
 
   (* Update the status of an observable (convergent or divergent) *)
-  let update_obs_status insts unary_pats graph pat_id root =
+  let update_obs_status insts pat_id root =
     let dummy_cache = Hashtbl.create 10 in
-    update_roots_now insts false unary_pats graph dummy_cache pat_id root ;
-    update_roots_now insts true unary_pats graph dummy_cache pat_id root
+    let ups = insts.precomputed_unary_patterns in
+    let graph = insts.current_mixture in
+    update_roots_now insts false ups graph dummy_cache pat_id root ;
+    update_roots_now insts true ups graph dummy_cache pat_id root
 
  
   let incorporate_extra_pattern st pat_id roots =
@@ -291,10 +330,8 @@ struct
       | New_reference_state (edges, obs) ->
         begin
           let st = { st with reference_mixture = edges } in
-          let ups = st.precomputed_unary_patterns in
-          let graph = st.current_mixture in
           obs |> List.iter (fun (pat_id, (root, _root_ty)) -> 
-            update_obs_status st ups graph pat_id root
+            update_obs_status st pat_id root
           ) ; st
         end
       | Flush_roots_buffer ->
@@ -589,7 +626,7 @@ struct
       rule : Div.t IntMap.t ;
       rule_pats : Rule_pats.t ;
       model : Model.t ;
-      block_partial : partial_event_predicate }
+      block_insts : partial_event_predicate }
 
   type message = div_instances_message
 
@@ -599,15 +636,13 @@ struct
 
   let update_all f t =
     { t with def = f t.def ; rule = IntMap.map f t.rule }
-
-  let receive_message msg = update_all (Div.receive_message msg)
-
+    
   let empty model = 
     { def = Div.empty model ;
       rule = IntMap.empty ;
       rule_pats = Rule_pats.init model ;
       model ;
-      block_partial = block_nothing }
+      block_insts = block_nothing }
 
   (* Copy a divergent instance *)
   let empty_copy model insts =
@@ -657,24 +692,35 @@ struct
     process_ccs_roots div_roots
 
 
-  let set_intervention rules block_partial t =
+  let set_intervention ~use_specialized_instances intervention t =
 
-    let rule_pats =
-      rules |> List.fold_left (fun rule_pats r ->
-        Rule_pats.follow_rule r rule_pats
-      ) (Rule_pats.reset t.rule_pats) in
+    if use_specialized_instances then
 
-    let rule =
-      rules |> List.fold_left (fun rule rule_id ->
-        let insts = empty_copy t.model t.def in
-        t.rule_pats |> Rule_pats.iter_pats ~rule_id (fun pat_id ->
-          initialize_specialized_instances 
-            ~model:t.model ~rule_id t.def insts pat_id block_partial
-        ) ;
-        IntMap.add rule_id insts rule
-      ) IntMap.empty in
-    
-    { t with rule ; rule_pats ; block_partial }
+      let block_insts = intervention.block_partial in
+
+      let rule_pats =
+        intervention.rules_to_monitor |> List.fold_left (fun rule_pats r ->
+          Rule_pats.follow_rule r rule_pats
+        ) (Rule_pats.reset t.rule_pats) in
+
+      let rule =
+        intervention.rules_to_monitor |> List.fold_left (fun rule rule_id ->
+          let insts = empty_copy t.model t.def in
+          t.rule_pats |> Rule_pats.iter_pats ~rule_id (fun pat_id ->
+            initialize_specialized_instances 
+              ~model:t.model ~rule_id t.def insts pat_id block_insts
+          ) ;
+          IntMap.add rule_id insts rule
+        ) IntMap.empty in
+      
+      { t with rule ; rule_pats ; block_insts }
+
+    else
+
+      { t with 
+        rule = IntMap.empty ; 
+        rule_pats = Rule_pats.reset t.rule_pats ; 
+        block_insts = block_nothing }
       
 
 
@@ -699,7 +745,7 @@ struct
           { pe_rule_instance = rule ;
             pe_pat = id ;
             pe_root = root } in
-        if not (is_positive_update && t.block_partial t.model graph pe) then
+        if not (is_positive_update && t.block_insts t.model graph pe) then
           Div.update_roots 
             insts is_positive_update unary_pats graph cache id root
     )
@@ -736,6 +782,27 @@ struct
     t |> query ?rule_id (fun t -> 
       Div.fold_unary_instances ?rule_id t (pat1, pat2) ~init f)
 
+  let receive_message msg state =
+    match msg with
+    | Set_intervention (use_specialized_instances, intervention) ->
+      set_intervention ~use_specialized_instances intervention state
+    | New_cur_mixture _ | Flush_roots_buffer ->
+      update_all (Div.receive_message msg) state
+    | New_reference_state (edges, obs) as msg ->
+      (* Transmit the message as-is to `def` *)
+      let def = state.def |> Div.receive_message msg in
+      (* We have to filter the observables depending on the rule *)
+      let rule = state.rule |> IntMap.mapi (fun pe_rule_instance inst ->
+        let obs =
+          obs |> List.filter (fun (pe_pat, (pe_root, _root_ty)) ->
+            let pe = { pe_rule_instance ; pe_pat ; pe_root } in
+            not (state.block_insts state.model state.def.current_mixture pe)
+          ) in
+        let msg = New_reference_state (edges, obs) in
+        inst |> Div.receive_message msg
+      ) in
+      { state with def ; rule }
+
 end
 
 (******************************************************************************)
@@ -751,28 +818,13 @@ module Modified_rule_interpreter =
 
 module Mri = Modified_rule_interpreter
 
-type event_properties = {
-  rule_instance: int option ;
-  actions: (Instantiation.concrete Instantiation.action) list ;
-  factual_event_id: int option ;
-}
-
-type event_predicate = Model.t -> event_properties -> bool
-
-type intervention_id = int
-
-type intervention = {
-  block: event_predicate ;
-  block_partial: partial_event_predicate ;
-  rules_to_monitor: int list ;
-}
-
 type state = {
   graph : Modified_rule_interpreter.t ;
   ref_state : Replay.state ;
   counter : Counter.t ;
   model : Model.t ;
   max_consecutive_null : int option ;
+  specialized_instances : bool ;
 
   special_steps : (float * (state -> state)) list ;
   (* TODO: implement special steps *)
@@ -820,8 +872,9 @@ let step_is_blocked_by_predicate (pred : event_predicate) model step =
     | Trace.Rule (rid, _, _) -> Some rid
     | _ -> None in
   let actions = fst (actions_of_step step) in
+  let tests = Trace.tests_of_step step in
   let factual_event_id = event_id_of_step step in
-  pred model {rule_instance ; actions ; factual_event_id}
+  pred model {rule_instance ; actions ; tests ; factual_event_id}
 
 (* Returns [(blocked, blocking)] where [blocked] is true iff the step is 
    blocked, in which case [blocking] gives the list of blocking 
@@ -889,36 +942,22 @@ let debug_print_obs_updates model (obs, deps) =
 
 (** {6 Add and remove interventions } *)
 
-let merge_interventions interventions =
-  let interventions = 
-    IntMap.bindings interventions 
-    |> List.map (fun (_, i) -> i) in
-
-  let rules_to_monitor =
-    interventions
-    |> List.map (fun i -> i.rules_to_monitor)
-    |> List.concat
-    |> List.sort_uniq compare in
-
-  let block model e =
-    List.exists (fun i -> i.block model e) interventions in
-
-  let block_partial model graph pe =
-    List.exists (fun i -> i.block_partial model graph pe) interventions in
-  
-  { rules_to_monitor ; block ; block_partial }
-
-
 (* TODO: the fun part happens here... *)
 let interventions_updated state =
   let pred =
     if IntMap.is_empty state.interventions then None
-    else Some (fun rule_instance _matching actions ->
+    else Some (fun rule_instance _matching tests actions ->
       IntMap.exists (fun _ intervention ->
         intervention.block state.model 
-          { rule_instance ; actions ; factual_event_id = None }
+          { rule_instance ; tests ; actions ; factual_event_id = None }
       ) state.interventions ) in
-  let graph = Mri.set_events_to_block pred state.graph in
+  let intervention = merge_interventions state.interventions in
+  let specialized_instances = state.specialized_instances in
+  let graph =
+    state.graph
+    |> Mri.set_events_to_block pred
+    |> Mri.send_instances_message 
+      (Set_intervention (specialized_instances, intervention)) in
   { state with graph }
 
 let clear_interventions state = 
@@ -961,6 +1000,9 @@ let model state = state.model
 let set_max_consecutive_null n state =
   { state with max_consecutive_null = n }
 
+let set_use_specialized_instances use state =
+  { state with specialized_instances = use}
+
 
 (******************************************************************************)
 (* RESIMULATION                                                               *)
@@ -974,6 +1016,7 @@ let init model random_state =
     ref_state = Replay.init_state ~with_connected_components:true ;
     model ;
     max_consecutive_null = None ;
+    specialized_instances = true ;
     special_steps = [] ;
     interventions = IntMap.empty ;
     next_intervention_id = 0 ;
