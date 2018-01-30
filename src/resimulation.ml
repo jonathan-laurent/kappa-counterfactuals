@@ -837,15 +837,52 @@ type step =
   | Factual_did_not_happen of (intervention_id list) * Trace.step
   | Counterfactual_happened of Trace.step
 
+let tested_agents tests =
+  let open Instantiation in
+  tests
+  |> List.map (function
+    | Is_Here ag -> [Agent.id ag]
+    | Has_Internal _ -> []
+    | Is_Free _ -> []
+    | Is_Bound _ -> []
+    | Has_Binding_type _ -> []
+    | Is_Bound_to _ -> []
+  )
+  |> List.concat
+  |> List.sort_uniq compare
+
+let pp_comma f = Format.fprintf f ", "
+
+let debug_print_tstep env f step =
+
+  let tests = Trace.tests_of_step step in
+  let ags = tested_agents tests in
+
+  let open Format in
+  match step with
+  | Trace.Init _  -> fprintf f "init"
+  | Trace.Dummy _ -> fprintf f "dummy"
+  | Trace.Pert _  -> fprintf f "pert"
+  | Trace.Subs _  -> fprintf f "subs"
+
+  | Trace.Rule (r, _, _)  -> 
+    fprintf f "%a\t(%a)" 
+      (Model.print_rule ~env) r 
+      (Pp.list pp_comma Format.pp_print_int) ags
+  | Trace.Obs (s, _, _)   -> 
+    fprintf f "%s\t(%a)" s
+      (Pp.list pp_comma Format.pp_print_int) ags
+
 
 let debug_print_resimulation_step env f = 
   let open Format in
-  let pp_step = Trace.print_step ~compact:true ~env in
+  let pp_step = debug_print_tstep env in
   function
     | Factual_happened step -> 
       fprintf f "[F] %a" pp_step step
-    | Factual_did_not_happen (_blocked, step) ->
-      fprintf f "[X] %a" pp_step step
+    | Factual_did_not_happen (blocked, step) ->
+      if blocked = [] then fprintf f "[.] %a" pp_step step
+      else fprintf f "[X] %a" pp_step step
     | Counterfactual_happened step -> fprintf f "[C] %a" pp_step step
 
 let actions_of_step = function
@@ -866,15 +903,18 @@ let event_id_of_step step =
   | None -> None
   | Some infos -> Some infos.Trace.Simulation_info.story_event
 
-let step_is_blocked_by_predicate (pred : event_predicate) model step =
+let event_properties_of_tstep tstep =
   let rule_instance = 
-    match step with
+    match tstep with
     | Trace.Rule (rid, _, _) -> Some rid
     | _ -> None in
-  let actions = fst (actions_of_step step) in
-  let tests = Trace.tests_of_step step in
-  let factual_event_id = event_id_of_step step in
-  pred model {rule_instance ; actions ; tests ; factual_event_id}
+  let actions = fst (actions_of_step tstep) in
+  let tests = Trace.tests_of_step tstep in
+  let factual_event_id = event_id_of_step tstep in
+  {rule_instance ; actions ; tests ; factual_event_id}
+
+let step_is_blocked_by_predicate (pred : event_predicate) model step =
+  pred model (event_properties_of_tstep step)
 
 (* Returns [(blocked, blocking)] where [blocked] is true iff the step is 
    blocked, in which case [blocking] gives the list of blocking 

@@ -34,6 +34,8 @@ type event_properties = {
   factual_event_id: int option ;
 }
 
+val event_properties_of_tstep : Trace.step -> event_properties
+
 type event_predicate = Model.t -> event_properties -> bool
 
 type partial_event = {
