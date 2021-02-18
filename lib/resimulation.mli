@@ -10,8 +10,12 @@
 (*                                                                            *)
 (******************************************************************************)
 
-(** Resimulation algorithm that serves as a basis for 
+(** Resimulation algorithm that serves as a basis for
     counterfactual reasoning. *)
+
+open Kappa_terms
+open Kappa_runtime
+open Kappa_mixtures
 
 type state
 
@@ -41,7 +45,7 @@ type event_predicate = Model.t -> event_properties -> bool
 type partial_event = {
   pe_rule_instance: int ;
   pe_pat: Pattern.id ;
-  pe_root: int 
+  pe_root: int
 }
 
 type partial_event_predicate =
@@ -57,7 +61,7 @@ val clear_interventions : state -> state
 
 val add_intervention :
   ?timeout:float -> intervention -> state -> intervention_id * state
-(** if provided, [timeout] is the time at which the 
+(** if provided, [timeout] is the time at which the
     intervention gets deactivated *)
 
 val remove_intervention : intervention_id -> state -> state
@@ -77,7 +81,7 @@ val do_step :
     @return [(reference_step_consummed, counterfactual_step, new_state)]
 
     Performs one step of resimulation. The first argument should be
-    [Some (step, blocked)] where [step] is the next step in the 
+    [Some (step, blocked)] where [step] is the next step in the
     reference trace and [block]
     is true iff it should be blocked. It should be [None] if there are no
     more events in the reference trace.
@@ -89,7 +93,7 @@ val do_step :
     more events in the reference trace and the divergent activity is 0. *)
 
 
-val resimulate : 
+val resimulate :
   ?do_init:(state -> state) ->
   ?do_before_factual:(Trace.step -> state -> state) ->
   ?do_after_step:(step -> state -> state) ->

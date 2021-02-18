@@ -7,14 +7,14 @@ an intervention.
 
 ### How to install
 
-In order to build this repository, you need to install the latest development
-version of KaSim: `opam pin --dev add KaSim`. Then, just type `make`.
+In order to build this repository, you need to install the KaSim API:
+`opam install kappa-library`. Then, just type `make test`.
 
 ### How to use
 
 The resimulator is mostly intended to be used as an OCaml library whose interface
-can be found at `src/resimulation.mli`. However, a restricted subset of features
-is currently available through the `resimulate` executable that can be used as 
+can be found at `lib/resimulation.mli`. However, a restricted subset of features
+is currently available through the `bin/resimulate` executable that can be used as
 follows:
 ```
 resimulate TRACE_FILE -b RULE

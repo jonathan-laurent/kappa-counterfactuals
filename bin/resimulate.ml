@@ -11,8 +11,11 @@
 (*                                                                            *)
 (******************************************************************************)
 
+open Kappa_terms
+open Kappa_mixtures
+open Kappa_runtime
+
 open Resimulation
-open Yojson
 
 (******************************************************************************)
 (* Command-line interface                                                     *)
@@ -81,7 +84,7 @@ let rec unzip = function
     x :: xs, y :: ys
 
 let name_of_rule model =
-  Format.asprintf "%a" (Model.print_rule ~env:model)
+  Format.asprintf "%a" (Model.print_rule ~noCounters:true ~env:model)
 
 let rules_of_name name model =
   Model.fold_rules (fun i acc _r ->
@@ -104,7 +107,7 @@ let modified_agents actions =
   |> List.map (function
     | Create (ag, _) -> [Agent.id ag]
     | Mod_internal ((ag, _), _) -> [Agent.id ag]
-    | Bind ((ag, _), (ag', _)) | Bind_to ((ag, _), (ag', _)) -> 
+    | Bind ((ag, _), (ag', _)) | Bind_to ((ag, _), (ag', _)) ->
       [Agent.id ag ; Agent.id ag']
     | Free (ag, _) -> [Agent.id ag]
     | Remove ag -> [Agent.id ag]
@@ -129,10 +132,10 @@ let tested_agents tests =
 let tested_agents_in_pe model graph pe =
   let nav = Pattern.Env.to_navigation (Model.domain model) pe.pe_pat in
   let ag = (pe.pe_root, Edges.get_sort pe.pe_root graph) in
-  match Navigation.concretize ag graph nav with
+  match Navigation.concretize ~debugMode:false ag graph nav with
   | None -> []
   | Some nav ->
-    nav 
+    nav
     |> List.map (fun ((ag, _s), _arr) -> ag)
     |> List.sort_uniq compare
 
@@ -156,7 +159,7 @@ let factual_event_id_of_step = function
 (******************************************************************************)
 
 let block_rule model rule_name =
-  let rules_to_monitor = 
+  let rules_to_monitor =
     rules_of_name rule_name model in
   let block_partial _ _ pe =
     List.mem pe.pe_rule_instance rules_to_monitor in
@@ -171,7 +174,7 @@ let block_punctual_event eid =
   { rules_to_monitor ; block_partial ; block }
 
 let block_rule_involving_any model rule_name ags =
-  let rules_to_monitor = 
+  let rules_to_monitor =
     rules_of_name rule_name model in
   let block_partial model graph pe =
     List.mem pe.pe_rule_instance rules_to_monitor &&
@@ -202,7 +205,7 @@ let compile_trigger = function
   | Rule rule_name ->
   fun model tstep ->
     begin match tstep with
-    | Trace.Subs _ | Trace.Pert _ | Trace.Init _ 
+    | Trace.Subs _ | Trace.Pert _ | Trace.Init _
     | Trace.Dummy _ | Trace.Obs _ -> false
     | Trace.Rule (r, _, _) -> name_of_rule model r = rule_name
     end
@@ -220,7 +223,7 @@ let compile_intervention (trigger, descr) =
       begin
         triggered := true ;
         let e = event_properties_of_tstep tstep in
-        let rule_name = 
+        let rule_name =
           match e.rule_instance with
           | None -> assert false (* see [trigger] definition *)
           | Some r -> name_of_rule (model state) r in
@@ -240,7 +243,7 @@ let compile_intervention (trigger, descr) =
       if not !triggered && trigger (model state) tstep then
       begin
         let e = event_properties_of_tstep tstep in
-        let _rule_name, eid = 
+        let _rule_name, eid =
           match e.rule_instance, e.factual_event_id with
           | None, _ | _, None -> assert false
           | Some r, Some eid -> name_of_rule (model state) r, eid in
@@ -266,7 +269,7 @@ let compile_intervention (trigger, descr) =
       else state
     in
     before_factual, after_step
-  
+
   | Knock_rule ->
     fire_once (fun rule_name _e state ->
       let intervention = block_rule (model state) rule_name in
@@ -275,7 +278,7 @@ let compile_intervention (trigger, descr) =
   | Knock_instance ->
     fire_once (fun rule_name e state ->
       let ags = tested_agents e.tests in
-      let intervention = 
+      let intervention =
         block_rule_involving_all (model state) rule_name ags in
       snd (add_intervention intervention state)
     )
@@ -304,14 +307,14 @@ type stats = {
   n_null : int ref ;
   n_factual_proper : int ref  ;
   n_counterfactual_proper : int ref  ;
-  n_common : int ref 
+  n_common : int ref
 }
 
 let stats_init () = {
   n_null = ref 0 ;
   n_factual_proper = ref 0 ;
   n_counterfactual_proper = ref 0 ;
-  n_common = ref 0 
+  n_common = ref 0
 }
 
 let stats_to_file f stats =
@@ -334,20 +337,20 @@ let () =
 
     let do_init state =
       state
-        |> set_max_consecutive_null !max_consecutive_null 
+        |> set_max_consecutive_null !max_consecutive_null
         |> set_use_specialized_instances (not !no_specialized_instances) in
 
-    let before, after = 
+    let before, after =
       !intervention_descrs
       |> List.map compile_intervention
       |> unzip in
     let do_before_factual = sequence before in
     let do_after_step = sequence after in
 
-    let output = 
+    let output =
       if !output = "" && !silent then "/dev/null"
       else !output in
-    
+
     with_file output (fun f ->
       let handle_step model step =
         begin match step with
@@ -355,7 +358,7 @@ let () =
           | Factual_did_not_happen _ -> incr stats.n_factual_proper
           | Counterfactual_happened _ -> incr stats.n_counterfactual_proper
         end ;
-        Format.fprintf f "%a@;" 
+        Format.fprintf f "%a@;"
           (Resimulation.debug_print_resimulation_step model) step in
       let handle_null_event () = incr stats.n_null in
 

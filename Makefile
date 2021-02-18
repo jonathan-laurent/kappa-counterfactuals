@@ -1,14 +1,11 @@
-BIN=resimulate
-
 all:
-	ocamlbuild -use-ocamlfind main.native
-	mv main.native $(BIN)
+	dune build bin/resimulate.exe
 
 clean:
-	rm -rf _build $(BIN)
-	rm -f tests/*.json tests/input*
+	dune clean
+	rm -f tests/*.json tests/input* tests/stats
 
 test: all
 	cd tests ; KaSim test.ka -var VA 10000 -trace t.json
-	./resimulate tests/t.json --block-instances b --stats stats --silent
-	cat stats
+	dune exec bin/resimulate.exe -- tests/t.json --block-instances b --stats tests/stats --silent
+	cat tests/stats
